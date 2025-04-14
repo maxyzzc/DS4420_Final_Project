@@ -1,4 +1,4 @@
-# Dynamic Asset Allocation using Machine Learning: A Sharpe Maximization Approach
+# Dynamic Asset Allocation with Macroeconomic-Informed Neural Networks
 ### Max Cernosia, Armaan Pruthi
 
 #### Background:
