@@ -1,0 +1,406 @@
+---
+title: "DS4420_Final_Project"
+output: html_document
+date: "2025-04-12"
+names: "Max Cernosia and Armaan Pruthi"
+---
+
+# Time Series Models to Forecast Neural Network Features
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(forecast)
+```
+
+## Data Setup and Helper Functions
+
+```{r}
+# Load data
+df <- read.csv("Downloads/project_data.csv")
+df$X <- as.Date(df$X)
+
+# Column sets
+ar_columns <- c("PSAVERT", "cpi", "unrate", "dff", "SP500", "BAMLCC0A0CMTRIV", "SOFR")
+ma_columns <- c("gdp_change", "pconsum_change", "psave_change", "SP500_return", "Bond_return", "SP500_Prev_Month_Return", "Bond_Prev_Month_Return")
+
+# Helper function to determine the amount of lags to use for AR models, based off the ACF plot
+get_significant_lags <- function(acf_result) {
+  threshold <- qnorm((1 + 0.95)/2)/sqrt(length(acf_result$acf))
+  lags <- which(abs(acf_result$acf[-1]) > threshold)
+  if (length(lags) == 0) return(1)
+  return(max(lags))
+}
+
+# Helper function to determine the amount of lags to use for MA models, based off the PACF plot
+get_significant_pac_lags <- function(pacf_result) {
+  threshold <- qnorm((1 + 0.95)/2)/sqrt(length(pacf_result$acf))
+  lags <- which(abs(pacf_result$acf[-1]) > threshold)
+  if (length(lags) == 0) return(1)
+  return(max(lags))
+}
+
+all_preds <- list()
+prediction_dates <- as.Date(c("2023-07-01", "2023-08-01", "2023-09-01"))
+
+```
+
+## Testing the Effectiveness of the Models - 80/20 split
+
+### Auto Regressive Models
+
+```{r}
+for (col in ar_columns) {
+  cat("\n## AR Model for", col, "\n")
+
+  ts_df <- na.omit(df[, c("X", col)])
+  names(ts_df)[2] <- "value"
+  
+  # Decomposition plot
+  ts_obj <- ts(ts_df$value, frequency = 12)
+  decomp <- decompose(ts_obj)
+  plot(decomp)
+
+  # ACF plot
+  acf_result <- acf(ts_df$value, main = paste("ACF of", col), plot = TRUE)
+  max_lag <- get_significant_lags(acf_result)
+  cat("Using lag(s):", 1:max_lag, "\n")
+
+  # Adding lags as columns in the dataset
+  for (i in 1:max_lag) {
+    ts_df[, paste0("Lag_", i)] <- dplyr::lag(ts_df$value, i)
+  }
+  ts_df <- na.omit(ts_df)
+  
+  # Splitting the data into training and testing sets
+  train_size <- round(0.8 * nrow(ts_df))
+  train_data <- ts_df[1:train_size,]
+  test_data <- ts_df[(train_size + 1):nrow(ts_df),]
+
+  y_train <- train_data$value
+  y_test <- test_data$value
+
+  lag_cols <- paste0("Lag_", 1:max_lag)
+  X_train <- as.matrix(train_data[, lag_cols])
+  X_test <- as.matrix(test_data[, lag_cols])
+
+  X_train <- cbind(1, X_train)
+  X_test <- cbind(1, X_test)
+
+  # Closed form solution
+  w <- solve(t(X_train) %*% X_train) %*% (t(X_train) %*% y_train)
+  y_pred <- X_test %*% w
+  
+  # MSE and MAE calculation
+  mse <- mean((y_test - y_pred)^2)
+  mae <- mean(abs(y_test - y_pred))
+  
+  cat("MSE for", col, ":", mse, "\n")
+  cat("MAE for", col, ":", mae, "\n")
+
+  
+  # Plotting the predictions on just the test data
+  prediction_dates <- test_data$X[1:length(y_pred)]
+  plot(prediction_dates, y_test, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(y_pred, y_test)), xlab = "Date", ylab = col,
+       main = paste("AR Model Predictions for", col))
+  lines(prediction_dates, y_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+
+  # Full series predictions
+  all_X <- as.matrix(ts_df[, lag_cols])
+  all_X <- cbind(1, all_X)
+  all_pred <- all_X %*% w
+  plot(ts_df$X, ts_df$value, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(all_pred, ts_df$value)), xlab = "Date", ylab = col,
+       main = paste("AR Model Full Series for", col))
+  lines(ts_df$X, all_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+
+}
+```
+
+### Moving Average Models
+
+```{r}
+for (col in ma_columns) {
+  cat("\nMA Model for", col, "\n")
+
+  ts_df <- na.omit(df[, c("X", col)])
+  names(ts_df)[2] <- "value"
+
+  # Decomposition plot
+  ts_obj <- ts(ts_df$value, frequency = 12)
+  decomp <- decompose(ts_obj)
+  plot(decomp)
+
+  # PACF plot
+  pacf_result <- pacf(ts_df$value, main = paste("PACF of", col), plot = TRUE)
+  max_lag <- get_significant_pac_lags(pacf_result)
+  cat("Using lag(s):", 1:max_lag, "\n")
+
+  mean_val <- mean(ts_df$value)
+  residuals <- ts_df$value - mean_val
+
+  # Adding lags as columns in the dataset
+  for (i in 1:max_lag) {
+    ts_df[, paste0("ResLag_", i)] <- dplyr::lag(residuals, i)
+  }
+  ts_df <- na.omit(ts_df)
+
+  # Splitting the data into training and testing sets
+  train_size <- round(0.8 * nrow(ts_df))
+  train_data <- ts_df[1:train_size,]
+  test_data <- ts_df[(train_size + 1):nrow(ts_df),]
+
+  y_train <- train_data$value
+  y_test <- test_data$value
+
+  lag_cols <- paste0("ResLag_", 1:max_lag)
+  X_train <- as.matrix(train_data[, lag_cols])
+  X_test <- as.matrix(test_data[, lag_cols])
+
+  X_train <- cbind(1, X_train)
+  X_test <- cbind(1, X_test)
+
+  # Closed form solution
+  w <- solve(t(X_train) %*% X_train) %*% (t(X_train) %*% y_train)
+  y_pred <- X_test %*% w
+  
+  # MSE and MAE calculation
+  mse <- mean((y_test - y_pred)^2)
+  mae <- mean(abs(y_test - y_pred))
+  
+  cat("MSE for", col, ":", mse, "\n")
+  cat("MAE for", col, ":", mae, "\n")
+
+  # Plotting the predictions on just the test data
+  prediction_dates <- test_data$X[1:length(y_pred)]
+  plot(prediction_dates, y_test, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(y_pred, y_test)), xlab = "Date", ylab = col,
+       main = paste("MA Model Predictions for", col))
+  lines(prediction_dates, y_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+
+  # Full series predictions
+  all_X <- as.matrix(ts_df[, lag_cols])
+  all_X <- cbind(1, all_X)
+  all_pred <- all_X %*% w
+  plot(ts_df$X, ts_df$value, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(all_pred, ts_df$value)), xlab = "Date", ylab = col,
+       main = paste("MA Model Full Series for", col))
+  lines(ts_df$X, all_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+}
+```
+
+## Utilizing the Models to Forecast 3 Months
+
+### Auto Regressive Models
+
+```{r}
+for (col in ar_columns) {
+  cat("\n## AR Model for", col, "\n")
+  
+  ts_df <- na.omit(df[, c("X", col)])
+  names(ts_df)[2] <- "value"
+
+  
+  # Decomposition plot
+  ts_obj <- ts(ts_df$value, frequency = 12)
+  decomp <- decompose(ts_obj)
+  plot(decomp)
+
+  # ACF plot
+  acf_result <- acf(ts_df$value, main = paste("ACF of", col), plot = TRUE)
+  max_lag <- get_significant_lags(acf_result)
+  cat("Using lag(s):", 1:max_lag, "\n")
+
+  # Adding lags as columns in the dataset
+  for (i in 1:max_lag) {
+    ts_df[, paste0("Lag_", i)] <- dplyr::lag(ts_df$value, i)
+  }
+  ts_df <- na.omit(ts_df)
+  
+  # Splitting the data into training and testing sets
+  train_size <- nrow(ts_df) - 3
+  train_data <- ts_df[1:train_size,]
+  test_data <- ts_df[(train_size + 1):nrow(ts_df),]
+
+  y_train <- train_data$value
+  y_test <- test_data$value
+
+  lag_cols <- paste0("Lag_", 1:max_lag)
+  X_train <- as.matrix(train_data[, lag_cols])
+  X_test <- as.matrix(test_data[, lag_cols])
+
+  X_train <- cbind(1, X_train)
+  X_test <- cbind(1, X_test)
+
+  # Closed form solution
+  w <- solve(t(X_train) %*% X_train) %*% (t(X_train) %*% y_train)
+  y_pred <- X_test %*% w
+  
+  # MSE and MAE calculation
+  mse <- mean((y_test - y_pred)^2)
+  mae <- mean(abs(y_test - y_pred))
+  
+  cat("MSE for", col, ":", mse, "\n")
+  cat("MAE for", col, ":", mae, "\n")  
+  
+  all_preds[[col]] <- y_pred
+
+  # Plotting the predictions on just the test data
+  prediction_dates <- test_data$X[1:length(y_pred)]
+  plot(prediction_dates, y_test, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(y_pred, y_test)), xlab = "Date", ylab = col,
+       main = paste("AR Model Predictions for", col))
+  lines(prediction_dates, y_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+
+  # Full series predictions
+  all_X <- as.matrix(ts_df[, lag_cols])
+  all_X <- cbind(1, all_X)
+  all_pred <- all_X %*% w
+  plot(ts_df$X, ts_df$value, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(all_pred, ts_df$value)), xlab = "Date", ylab = col,
+       main = paste("AR Model Full Series for", col))
+  lines(ts_df$X, all_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+}
+```
+
+
+### Moving Average Models
+
+```{r}
+for (col in ma_columns) {
+  cat("\nMA Model for", col, "\n")
+
+  ts_df <- na.omit(df[, c("X", col)])
+  names(ts_df)[2] <- "value"
+
+  # Decomposition plot
+  ts_obj <- ts(ts_df$value, frequency = 12)
+  decomp <- decompose(ts_obj)
+  plot(decomp)
+
+  # PACF plot
+  pacf_result <- pacf(ts_df$value, main = paste("PACF of", col), plot = TRUE)
+  max_lag <- get_significant_pac_lags(pacf_result)
+  cat("Using lag(s):", 1:max_lag, "\n")
+  
+  mean_val <- mean(ts_df$value)
+  residuals <- ts_df$value - mean_val
+
+  # Adding lags as columns in the dataset
+  for (i in 1:max_lag) {
+    ts_df[, paste0("ResLag_", i)] <- dplyr::lag(residuals, i)
+  }
+  ts_df <- na.omit(ts_df)
+
+  # Splitting the data into training and testing sets
+  train_size <- nrow(ts_df) - 3
+  train_data <- ts_df[1:train_size,]
+  test_data <- ts_df[(train_size + 1):nrow(ts_df),]
+
+  y_train <- train_data$value
+  y_test <- test_data$value
+
+  lag_cols <- paste0("ResLag_", 1:max_lag)
+  X_train <- as.matrix(train_data[, lag_cols])
+  X_test <- as.matrix(test_data[, lag_cols])
+
+  X_train <- cbind(1, X_train)
+  X_test <- cbind(1, X_test)
+
+  # Closed form solution
+  w <- solve(t(X_train) %*% X_train) %*% (t(X_train) %*% y_train)
+  y_pred <- X_test %*% w
+
+  # MSE and MAE calculation
+  mse <- mean((y_test - y_pred)^2)
+  mae <- mean(abs(y_test - y_pred))
+  
+  cat("MSE for", col, ":", mse, "\n")
+  cat("MAE for", col, ":", mae, "\n")  
+    
+  all_preds[[col]] <- y_pred
+
+  # Plotting the predictions on just the test data
+  prediction_dates <- test_data$X[1:length(y_pred)]
+  plot(prediction_dates, y_test, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(y_pred, y_test)), xlab = "Date", ylab = col,
+       main = paste("MA Model Predictions for", col))
+  lines(prediction_dates, y_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+
+  # Full series predictions
+  all_X <- as.matrix(ts_df[, lag_cols])
+  all_X <- cbind(1, all_X)
+  all_pred <- all_X %*% w
+  plot(ts_df$X, ts_df$value, type = "l", col = "blue", lwd = 2,
+       ylim = range(c(all_pred, ts_df$value)), xlab = "Date", ylab = col,
+       main = paste("MA Model Full Series for", col))
+  lines(ts_df$X, all_pred, col = "red", lwd = 2, lty = 2)
+  legend("topright", legend = c("Actual", "Predicted"),
+         col = c("blue", "red"), lty = c(1, 2), bty = "n")
+}
+
+```
+
+### Building a CSV of the Predicted Features
+
+```{r}
+# Create dataframe for predicted features
+pred_df <- as.data.frame(all_preds)
+row.names(pred_df) <- c("July", "August", "September")
+
+# Export to CSV
+write.csv(pred_df, "model_predictions.csv", row.names = TRUE)
+```
+
+
+### Creating Visualizations for RISE Poster
+
+```{r}
+library(grid)
+library(png)
+
+# Load each image
+img1 <- readPNG("decomp.png")
+img2 <- readPNG("acf.png")
+img3 <- readPNG("ar.png")
+img4 <- readPNG("ar_full.png")
+
+# Create a 2x2 layout
+grid.newpage()
+pushViewport(viewport(layout = grid.layout(3, 2, heights = unit(c(0.1, 0.45, 0.45), "npc"))))
+
+# Add title in row 1 (spanning 2 columns)
+grid.text("Forecasting Bond Returns - AR Model Summary", 
+          vp = viewport(layout.pos.row = 1, layout.pos.col = 1:2),
+          gp = gpar(fontsize = 16, fontface = "bold"))
+
+# Helper to place images
+place_img <- function(img, row, col) {
+  vp <- viewport(layout.pos.row = row, layout.pos.col = col)
+  grid.raster(img, vp = vp)
+}
+
+# Place each image in 2x2 grid (rows 2 & 3)
+place_img(img1, 2, 1) 
+place_img(img2, 2, 2)  
+place_img(img3, 3, 1)  
+place_img(img4, 3, 2)  
+```
+
+
